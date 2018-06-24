@@ -167,6 +167,9 @@ class WideResNet(SequentialModule):
         # classification scores from linear combinations of features.
         view = LambdaModule(lambda x: x.view(-1, self.widened_channels[-1]))
         fc = nn.Linear(self.widened_channels[self.group_number], self.classes)
+        
+        # softmax
+        softmax = LambdaModule(lambda x: nn.functional.softmax(x, dim=1))
 
         # the final model structure.
-        return [conv, *residual_block_groups, pool, bn, relu, view, fc]
+        return [conv, *residual_block_groups, pool, bn, relu, view, fc, softmax]
