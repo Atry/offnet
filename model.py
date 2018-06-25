@@ -24,7 +24,7 @@ class SequentialModule(nn.Module):
         raise NotImplementedError
 
     def build(self):
-        self.sequential = nn.Sequential(*self.layers)
+        self.sequential = nn.Sequential(*self.layers())
 
     def forward(self, x):
         return self.sequential(x)
@@ -63,7 +63,6 @@ class OffConv2d(nn.Module):
             groups=groups,
             bias=True
         )
-        nn.init.normal_(self.offset_x.bias, mean=0, std=1)
         self.offset_y = nn.Conv2d(
             in_channels,
             out_channels,
@@ -74,30 +73,47 @@ class OffConv2d(nn.Module):
             groups=groups,
             bias=True
         )
-        nn.init.normal_(self.offset_y.bias, mean=0, std=1)
 
     def forward(self, x):
         original_score = self.score(x)
         batch_size, number_of_channels, height, width = original_score.size()
         return nn.functional.grid_sample(
             original_score.view(-1, 1, height, width),
-            torch.stack(
-                (
-                    self.offset_x(x).view(-1, height, width),
-                    self.offset_y(x).view(-1, height, width)
-                ),
-                dim=3
-            )
+            (
+                torch.nn.functional.affine_grid(torch.tensor((((1.0, 0.0, 0.0), (0.0, 1.0, 0.0)),), device=x.device), torch.Size((1, 1, height, width))) +
+                torch.stack(
+                    (
+                        self.offset_x(x).view(-1, height, width),
+                        self.offset_y(x).view(-1, height, width)
+                    ),
+                    dim=3
+                ) * (2 / max(height, width))
+            ).detach()
         ).view(batch_size, number_of_channels, height, width)
 
 
 class FakeConv(nn.Module):
-    def __init__(self, input_channels, output_channels, expand_multiplication=9, stride=1, bias=False):
+    def __init__(self, input_channels, output_channels, initial_offsets, stride=1, bias=False):
         super().__init__()
+        (expand_multiplication, two) = initial_offsets.size()
+        assert two == 2
+        self.output_channels = output_channels
+        self.expand_multiplication = expand_multiplication
         self.expand = OffConv2d(input_channels, output_channels * expand_multiplication, 1, stride=stride, padding=0, bias=bias)
-        self.bottleneck = OffConv2d(output_channels * expand_multiplication, output_channels, 1, stride=1, padding=0, bias=bias)
+        initial_x, initial_y = torch.unbind(initial_offsets, dim=1)
+        def initialize_offset(bias, initial):
+            with torch.no_grad():
+                bias[:] = initial.unsqueeze(0).expand(output_channels, expand_multiplication).contiguous().view(output_channels * expand_multiplication)
+        initialize_offset(self.expand.offset_x.bias, initial_x)
+        initialize_offset(self.expand.offset_y.bias, initial_y)
+#         self.bottleneck = OffConv2d(output_channels * expand_multiplication, output_channels, 1, stride=1, padding=0, bias=bias)
+#     def forward(self, x):
+#         return self.bottleneck(self.expand(x))
     def forward(self, x):
-        return self.bottleneck(self.expand(x))
+        expanded = self.expand(x)
+        batch_size, channels, height, width = expanded.size()
+        return expanded.view(batch_size, self.output_channels, self.expand_multiplication, height, width).sum(2)
+
 
 
 class OffBlock(nn.Module):
@@ -109,14 +125,14 @@ class OffBlock(nn.Module):
         self.relu1 = nn.ReLU(inplace=True)
         self.conv1 = FakeConv(
             input_channels, output_channels,
-            expand_multiplication=9, stride=stride, bias=False
+            initial_offsets=torch.tensor(tuple((x, y) for x in range(-1, 2) for y in range(-1, 2))), stride=stride, bias=False
         )
         # 2
         self.bn2 = nn.BatchNorm2d(output_channels)
         self.relu2 = nn.ReLU(inplace=True)
         self.conv2 = FakeConv(
             output_channels, output_channels,
-            expand_multiplication=9, stride=1, bias=False
+            initial_offsets=torch.Tensor(tuple((x, y) for x in range(-1, 2) for y in range(-1, 2))), stride=1, bias=False
         )
         # transformation
         self.need_transform = input_channels != output_channels
@@ -141,7 +157,6 @@ class OffBlockGroup(SequentialModule):
         self.stride = stride
         self.build()
 
-    @property
     def layers(self):
         return [
             OffBlock(
@@ -158,15 +173,15 @@ class Offnet(SequentialModule):
                  baseline_strides=None,
                  baseline_channels=None):
         super().__init__()
-
+        
         # model name label.
         self.label = label
-
+        
         # data specific hyperparameters.
         self.input_size = input_size
         self.input_channels = input_channels
         self.classes = classes
-
+        
         # model hyperparameters.
         self.total_block_number = total_block_number
         self.widen_factor = widen_factor
@@ -177,17 +192,19 @@ class Offnet(SequentialModule):
             enumerate(self.baseline_channels)
         ]
         self.group_number = len(self.widened_channels) - 1
-
+        
         # validate total block number.
         assert len(self.baseline_channels) == len(self.baseline_strides)
         assert (
             self.total_block_number % (2*self.group_number) == 0 and
             self.total_block_number // (2*self.group_number) >= 1
         ), 'Total number of residual blocks should be multiples of 2 x N.'
-
+        
+        print(self.layers())
+        
         # build the sequential model.
         self.build()
-
+    
     @property
     def name(self):
         return (
@@ -200,8 +217,7 @@ class Offnet(SequentialModule):
             channels=self.input_channels,
             label=self.label,
         )
-
-    @property
+    
     def layers(self):
         # define group configurations.
         blocks_per_group = self.total_block_number // self.group_number
@@ -282,7 +298,6 @@ class ResidualBlockGroup(SequentialModule):
         self.stride = stride
         self.build()
 
-    @property
     def layers(self):
         return [
             ResidualBlock(
@@ -342,7 +357,6 @@ class WideResNet(SequentialModule):
             label=self.label,
         )
 
-    @property
     def layers(self):
         # define group configurations.
         blocks_per_group = self.total_block_number // self.group_number
