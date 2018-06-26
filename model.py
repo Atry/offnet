@@ -33,19 +33,13 @@ class SequentialModule(nn.Module):
 # ================
 # Concrete Modules
 # ================
-
-class OffConv2d(nn.Module):
-    def __init__(self, in_channels, out_channels,
-                 kernel_size,
-                 stride=1,
-                 padding=0,
-                 dilation=1,
-                 groups=1,
-                 bias=True):
+class Deform2d(torch.nn.Module):
+    def __init__(self, number_in_channels, number_of_filters,
+                 kernel_size=1, stride=1, padding=0, dilation=1, groups=1, bias=True):
         super().__init__()
-        self.score = nn.Conv2d(
-            in_channels,
-            out_channels,
+        self.conv = torch.nn.Conv2d(
+            number_in_channels,
+            2 * number_of_filters,
             kernel_size=kernel_size,
             stride=stride,
             padding=padding,
@@ -53,93 +47,80 @@ class OffConv2d(nn.Module):
             groups=groups,
             bias=bias
         )
-        self.offset_x = nn.Conv2d(
-            in_channels,
-            out_channels,
-            kernel_size=kernel_size,
-            stride=stride,
-            padding=padding,
-            dilation=dilation,
-            groups=groups,
-            bias=True
-        )
-        self.offset_y = nn.Conv2d(
-            in_channels,
-            out_channels,
-            kernel_size=kernel_size,
-            stride=stride,
-            padding=padding,
-            dilation=dilation,
-            groups=groups,
-            bias=True
-        )
+        self.reset_parameters()
+
+    def reset_parameters(self):
+        torch.nn.init.constant_(self.conv.weight, 0.0)
+        torch.nn.init.uniform_(self.conv.weight, -0.05, 0.05)
+
+    @functools.lru_cache(maxsize=None)
+    def identity_grid(device_index, height, width):
+        return torch.nn.functional.affine_grid(torch.tensor((((1.0, 0.0, 0.0), (0.0, 1.0, 0.0)),), device=torch.device(device_index)), torch.Size((1, 1, height, width)))
 
     def forward(self, x):
-        original_score = self.score(x)
-        batch_size, number_of_channels, height, width = original_score.size()
-        return nn.functional.grid_sample(
-            original_score.view(-1, 1, height, width),
-            (
-                torch.nn.functional.affine_grid(torch.tensor((((1.0, 0.0, 0.0), (0.0, 1.0, 0.0)),), device=x.device), torch.Size((1, 1, height, width))) +
-                torch.stack(
-                    (
-                        self.offset_x(x).view(-1, height, width),
-                        self.offset_y(x).view(-1, height, width)
-                    ),
-                    dim=3
-                ) * (2 / max(height, width))
-            ).detach()
-        ).view(batch_size, number_of_channels, height, width)
+        batch_size, number_in_channels, height, width = x.size()
+        deformation = self.conv(x)
+        batch_size, uv, height, width = deformation.size()
+        number_of_filters = uv // 2
+        deformation.view(batch_size * number_of_filters, 2, height, width).permute(0, 2, 3, 1)
+        
+        expanded_input = x.unsqueeze(1).expand(batch_size, number_of_filters, number_in_channels, height, width).contiguous().view(batch_size * number_of_filters, number_in_channels, height, width)
+        
+        grid = Deform2d.identity_grid(x.device.index, height, width) + deformation \
+            .view(batch_size * number_of_filters, 2, height, width) \
+            .permute(0, 2, 3, 1)
 
+        return torch.nn.functional.grid_sample(
+            input=expanded_input,
+            grid=grid
+        ).view(batch_size, number_of_filters * number_in_channels, height, width)
 
-class FakeConv(nn.Module):
-    def __init__(self, input_channels, output_channels, initial_offsets, stride=1, bias=False):
+class FakeConv2d(torch.nn.Module):
+    def __init__(self, in_channels, out_channels, kernel_size, stride=1, bias=True):
         super().__init__()
-        (expand_multiplication, two) = initial_offsets.size()
-        assert two == 2
-        self.output_channels = output_channels
-        self.expand_multiplication = expand_multiplication
-        self.expand = OffConv2d(input_channels, output_channels * expand_multiplication, 1, stride=stride, padding=0, bias=bias)
-        initial_x, initial_y = torch.unbind(initial_offsets, dim=1)
-        def initialize_offset(bias, initial):
-            with torch.no_grad():
-                bias[:] = initial.unsqueeze(0).expand(output_channels, expand_multiplication).contiguous().view(output_channels * expand_multiplication)
-        torch.nn.init.constant_(self.expand.offset_x.weight, 0.0)
-        torch.nn.init.constant_(self.expand.offset_y.weight, 0.0)
-        initialize_offset(self.expand.offset_x.bias, initial_x)
-        initialize_offset(self.expand.offset_y.bias, initial_y)
-#         self.bottleneck = OffConv2d(output_channels * expand_multiplication, output_channels, 1, stride=1, padding=0, bias=bias)
-#     def forward(self, x):
-#         return self.bottleneck(self.expand(x))
+        kernel_height, kernel_width = torch.nn.modules.utils._pair(kernel_size)
+        self.deform = Deform2d(in_channels, kernel_height * kernel_width)
+        self.conv = torch.nn.Conv2d(in_channels * kernel_height * kernel_width, out_channels, 1, stride=stride, bias=bias)
+        def generate_offset():
+            half_kernel_height = kernel_height // 2
+            half_kernel_width = kernel_width // 2
+            kernel_y_range = range(-half_kernel_height, kernel_height - half_kernel_height)
+            kernel_x_range = range(-half_kernel_width, kernel_width - half_kernel_width)
+            for y in kernel_y_range:
+                for x in kernel_x_range:
+                    yield x / 16
+            for y in kernel_y_range:
+                for x in kernel_x_range:
+                    yield y / 16
+        with torch.no_grad():
+            torch.nn.init.constant_(self.deform.conv.weight, 0.0)
+            self.deform.conv.bias[:] = torch.tensor(tuple(generate_offset()))
+
     def forward(self, x):
-        expanded = self.expand(x)
-        batch_size, channels, height, width = expanded.size()
-        return expanded.view(batch_size, self.output_channels, self.expand_multiplication, height, width).sum(2)
-
-
+        return self.conv(self.deform(x))
 
 class OffBlock(nn.Module):
-    def __init__(self, input_channels, output_channels, stride):
+    def __init__(self, in_channels, out_channels, stride):
         super().__init__()
 
         # 1
-        self.bn1 = nn.BatchNorm2d(input_channels)
+        self.bn1 = nn.BatchNorm2d(in_channels)
         self.relu1 = nn.ReLU(inplace=True)
-        self.conv1 = FakeConv(
-            input_channels, output_channels,
-            initial_offsets=torch.tensor(tuple((x, y) for x in range(-1, 2) for y in range(-1, 2))), stride=stride, bias=False
+        self.conv1 = FakeConv2d(
+            in_channels, out_channels,
+            kernel_size=3, stride=stride, bias=False
         )
         # 2
-        self.bn2 = nn.BatchNorm2d(output_channels)
+        self.bn2 = nn.BatchNorm2d(out_channels)
         self.relu2 = nn.ReLU(inplace=True)
-        self.conv2 = FakeConv(
-            output_channels, output_channels,
-            initial_offsets=torch.Tensor(tuple((x, y) for x in range(-1, 2) for y in range(-1, 2))), stride=1, bias=False
+        self.conv2 = FakeConv2d(
+            out_channels, out_channels,
+            kernel_size=3, stride=1, bias=False
         )
         # transformation
-        self.need_transform = input_channels != output_channels
+        self.need_transform = in_channels != out_channels
         self.conv_transform = nn.Conv2d(
-            input_channels, output_channels,
+            in_channels, out_channels,
             kernel_size=1, stride=stride, padding=0, bias=False
         ) if self.need_transform else None
 
@@ -151,26 +132,26 @@ class OffBlock(nn.Module):
 
 
 class OffBlockGroup(SequentialModule):
-    def __init__(self, block_number, input_channels, output_channels, stride):
+    def __init__(self, block_number, in_channels, out_channels, stride):
         super().__init__()
         self.block_number = block_number
-        self.input_channels = input_channels
-        self.output_channels = output_channels
+        self.in_channels = in_channels
+        self.out_channels = out_channels
         self.stride = stride
         self.build()
 
     def layers(self):
         return [
             OffBlock(
-                self.input_channels if i == 0 else self.output_channels,
-                self.output_channels,
+                self.in_channels if i == 0 else self.out_channels,
+                self.out_channels,
                 self.stride if i == 0 else 1
             ) for i in range(self.block_number)
         ]
 
 
 class Offnet(SequentialModule):
-    def __init__(self, label, input_size, input_channels, classes,
+    def __init__(self, label, input_size, in_channels, classes,
                  total_block_number, widen_factor=1,
                  baseline_strides=None,
                  baseline_channels=None):
@@ -181,7 +162,7 @@ class Offnet(SequentialModule):
         
         # data specific hyperparameters.
         self.input_size = input_size
-        self.input_channels = input_channels
+        self.in_channels = in_channels
         self.classes = classes
         
         # model hyperparameters.
@@ -201,9 +182,7 @@ class Offnet(SequentialModule):
             self.total_block_number % (2*self.group_number) == 0 and
             self.total_block_number // (2*self.group_number) >= 1
         ), 'Total number of residual blocks should be multiples of 2 x N.'
-        
-        print(self.layers())
-        
+                
         # build the sequential model.
         self.build()
     
@@ -216,7 +195,7 @@ class Offnet(SequentialModule):
             depth=(self.total_block_number+4),
             widen_factor=self.widen_factor,
             size=self.input_size,
-            channels=self.input_channels,
+            channels=self.in_channels,
             label=self.label,
         )
     
@@ -231,7 +210,7 @@ class Offnet(SequentialModule):
 
         # convolution layer.
         conv = nn.Conv2d(
-            self.input_channels, self.widened_channels[0],
+            self.in_channels, self.widened_channels[0],
             kernel_size=3, stride=1, padding=1, bias=False
         )
 
@@ -260,27 +239,27 @@ class Offnet(SequentialModule):
         return [conv, *residual_block_groups, pool, bn, relu, view, fc, softmax]
 
 class ResidualBlock(nn.Module):
-    def __init__(self, input_channels, output_channels, stride):
+    def __init__(self, in_channels, out_channels, stride):
         super().__init__()
 
         # 1
-        self.bn1 = nn.BatchNorm2d(input_channels)
+        self.bn1 = nn.BatchNorm2d(in_channels)
         self.relu1 = nn.ReLU(inplace=True)
         self.conv1 = nn.Conv2d(
-            input_channels, output_channels,
+            in_channels, out_channels,
             kernel_size=3, stride=stride, padding=1, bias=False
         )
         # 2
-        self.bn2 = nn.BatchNorm2d(output_channels)
+        self.bn2 = nn.BatchNorm2d(out_channels)
         self.relu2 = nn.ReLU(inplace=True)
         self.conv2 = nn.Conv2d(
-            output_channels, output_channels,
+            out_channels, out_channels,
             kernel_size=3, stride=1, padding=1, bias=False
         )
         # transformation
-        self.need_transform = input_channels != output_channels
+        self.need_transform = in_channels != out_channels
         self.conv_transform = nn.Conv2d(
-            input_channels, output_channels,
+            in_channels, out_channels,
             kernel_size=1, stride=stride, padding=0, bias=False
         ) if self.need_transform else None
 
@@ -292,26 +271,26 @@ class ResidualBlock(nn.Module):
 
 
 class ResidualBlockGroup(SequentialModule):
-    def __init__(self, block_number, input_channels, output_channels, stride):
+    def __init__(self, block_number, in_channels, out_channels, stride):
         super().__init__()
         self.block_number = block_number
-        self.input_channels = input_channels
-        self.output_channels = output_channels
+        self.in_channels = in_channels
+        self.out_channels = out_channels
         self.stride = stride
         self.build()
 
     def layers(self):
         return [
             ResidualBlock(
-                self.input_channels if i == 0 else self.output_channels,
-                self.output_channels,
+                self.in_channels if i == 0 else self.out_channels,
+                self.out_channels,
                 self.stride if i == 0 else 1
             ) for i in range(self.block_number)
         ]
 
 
 class WideResNet(SequentialModule):
-    def __init__(self, label, input_size, input_channels, classes,
+    def __init__(self, label, input_size, in_channels, classes,
                  total_block_number, widen_factor=1,
                  baseline_strides=None,
                  baseline_channels=None):
@@ -322,7 +301,7 @@ class WideResNet(SequentialModule):
 
         # data specific hyperparameters.
         self.input_size = input_size
-        self.input_channels = input_channels
+        self.in_channels = in_channels
         self.classes = classes
 
         # model hyperparameters.
@@ -355,7 +334,7 @@ class WideResNet(SequentialModule):
             depth=(self.total_block_number+4),
             widen_factor=self.widen_factor,
             size=self.input_size,
-            channels=self.input_channels,
+            channels=self.in_channels,
             label=self.label,
         )
 
@@ -370,7 +349,7 @@ class WideResNet(SequentialModule):
 
         # convolution layer.
         conv = nn.Conv2d(
-            self.input_channels, self.widened_channels[0],
+            self.in_channels, self.widened_channels[0],
             kernel_size=3, stride=1, padding=1, bias=False
         )
 
