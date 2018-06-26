@@ -104,6 +104,8 @@ class FakeConv(nn.Module):
         def initialize_offset(bias, initial):
             with torch.no_grad():
                 bias[:] = initial.unsqueeze(0).expand(output_channels, expand_multiplication).contiguous().view(output_channels * expand_multiplication)
+        torch.nn.init.constant_(self.expand.offset_x.weight, 0.0)
+        torch.nn.init.constant_(self.expand.offset_y.weight, 0.0)
         initialize_offset(self.expand.offset_x.bias, initial_x)
         initialize_offset(self.expand.offset_y.bias, initial_y)
 #         self.bottleneck = OffConv2d(output_channels * expand_multiplication, output_channels, 1, stride=1, padding=0, bias=bias)
