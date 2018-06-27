@@ -51,7 +51,7 @@ class Deform2d(torch.nn.Module):
 
     def reset_parameters(self):
         torch.nn.init.constant_(self.conv.weight, 0.0)
-        torch.nn.init.uniform_(self.conv.weight, -0.05, 0.05)
+        torch.nn.init.normal_(self.conv.weight)
 
     @functools.lru_cache(maxsize=None)
     def identity_grid(device_index, height, width):
@@ -59,7 +59,7 @@ class Deform2d(torch.nn.Module):
 
     def forward(self, x):
         batch_size, number_in_channels, height, width = x.size()
-        deformation = self.conv(x)
+        deformation = self.conv(x) * (2 / max(height, width))
         batch_size, uv, height, width = deformation.size()
         number_of_filters = uv // 2
         deformation.view(batch_size * number_of_filters, 2, height, width).permute(0, 2, 3, 1)
@@ -72,7 +72,7 @@ class Deform2d(torch.nn.Module):
 
         return torch.nn.functional.grid_sample(
             input=expanded_input,
-            grid=grid
+            grid=grid.detach()
         ).view(batch_size, number_of_filters * number_in_channels, height, width)
 
 class FakeConv2d(torch.nn.Module):
@@ -88,10 +88,10 @@ class FakeConv2d(torch.nn.Module):
             kernel_x_range = range(-half_kernel_width, kernel_width - half_kernel_width)
             for y in kernel_y_range:
                 for x in kernel_x_range:
-                    yield x / 16
+                    yield x
             for y in kernel_y_range:
                 for x in kernel_x_range:
-                    yield y / 16
+                    yield y
         with torch.no_grad():
             torch.nn.init.constant_(self.deform.conv.weight, 0.0)
             self.deform.conv.bias[:] = torch.tensor(tuple(generate_offset()))
@@ -232,11 +232,8 @@ class Offnet(SequentialModule):
         view = LambdaModule(lambda x: x.view(-1, self.widened_channels[-1]))
         fc = nn.Linear(self.widened_channels[self.group_number], self.classes)
         
-        # softmax
-        softmax = LambdaModule(lambda x: nn.functional.softmax(x, dim=1))
-
         # the final model structure.
-        return [conv, *residual_block_groups, pool, bn, relu, view, fc, softmax]
+        return [conv, *residual_block_groups, pool, bn, relu, view, fc]
 
 class ResidualBlock(nn.Module):
     def __init__(self, in_channels, out_channels, stride):
@@ -371,9 +368,6 @@ class WideResNet(SequentialModule):
         view = LambdaModule(lambda x: x.view(-1, self.widened_channels[-1]))
         fc = nn.Linear(self.widened_channels[self.group_number], self.classes)
         
-        # softmax
-        softmax = LambdaModule(lambda x: nn.functional.softmax(x, dim=1))
-
         # the final model structure.
-        return [conv, *residual_block_groups, pool, bn, relu, view, fc, softmax]
+        return [conv, *residual_block_groups, pool, bn, relu, view, fc]
 
