@@ -7,7 +7,7 @@ name = "pypi"
 torch = "*"
 torchvision = "*"
 keras = "*"
-skorch = "git+https://github.com/ThoughtWorksInc/skorch.git"
+skorch = { git = 'https://github.com/ThoughtWorksInc/skorch.git', editable = true }
 
 [dev-packages]
 jupyter = "*"
