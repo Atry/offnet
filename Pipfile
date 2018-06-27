@@ -8,6 +8,7 @@ torch = "*"
 torchvision = "*"
 keras = "*"
 skorch = { git = 'https://github.com/ThoughtWorksInc/skorch.git', editable = true }
+tensorflow = "*"
 
 [dev-packages]
 jupyter = "*"
