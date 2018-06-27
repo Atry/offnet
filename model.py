@@ -110,6 +110,10 @@ class OffBlock(nn.Module):
             in_channels, out_channels,
             kernel_size=3, stride=stride, bias=False
         )
+        
+        # dropout
+        self.dropout = nn.Dropout()
+
         # 2
         self.bn2 = nn.BatchNorm2d(out_channels)
         self.relu2 = nn.ReLU(inplace=True)
@@ -127,7 +131,7 @@ class OffBlock(nn.Module):
     def forward(self, x):
         x_nonlinearity_applied = self.relu1(self.bn1(x))
         y = self.conv1(x_nonlinearity_applied)
-        y = self.conv2(self.relu2(self.bn2(y)))
+        y = self.conv2(self.dropout(self.relu2(self.bn2(y))))
         return y.add_(self.conv_transform(x) if self.need_transform else x)
 
 
@@ -246,6 +250,10 @@ class ResidualBlock(nn.Module):
             in_channels, out_channels,
             kernel_size=3, stride=stride, padding=1, bias=False
         )
+        
+        # dropout
+        self.dropout = nn.Dropout()
+        
         # 2
         self.bn2 = nn.BatchNorm2d(out_channels)
         self.relu2 = nn.ReLU(inplace=True)
@@ -263,7 +271,7 @@ class ResidualBlock(nn.Module):
     def forward(self, x):
         x_nonlinearity_applied = self.relu1(self.bn1(x))
         y = self.conv1(x_nonlinearity_applied)
-        y = self.conv2(self.relu2(self.bn2(y)))
+        y = self.conv2(self.dropout(self.relu2(self.bn2(y))))
         return y.add_(self.conv_transform(x) if self.need_transform else x)
 
 
