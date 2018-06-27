@@ -72,7 +72,7 @@ class Deform2d(torch.nn.Module):
 
         return torch.nn.functional.grid_sample(
             input=expanded_input,
-            grid=grid.detach()
+            grid=grid
         ).view(batch_size, number_of_filters * number_in_channels, height, width)
 
 class FakeConv2d(torch.nn.Module):
