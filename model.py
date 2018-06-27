@@ -55,7 +55,7 @@ class Deform2d(torch.nn.Module):
 
     @functools.lru_cache(maxsize=None)
     def identity_grid(device_index, height, width):
-        return torch.nn.functional.affine_grid(torch.tensor((((1.0, 0.0, 0.0), (0.0, 1.0, 0.0)),), device=torch.device(device_index)), torch.Size((1, 1, height, width)))
+        return torch.nn.functional.affine_grid(torch.tensor((((1.0, 0.0, 0.0), (0.0, 1.0, 0.0)),), device=None if device_index is None else torch.device(device_index)), torch.Size((1, 1, height, width)))
 
     def forward(self, x):
         batch_size, number_in_channels, height, width = x.size()
