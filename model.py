@@ -2,6 +2,7 @@ import abc
 import functools
 import operator
 import torch
+import torch.utils.checkpoint
 from torch import nn
 
 
@@ -98,6 +99,7 @@ class FakeConv2d(torch.nn.Module):
 
     def forward(self, x):
         return self.conv(self.deform(x))
+#         return torch.utils.checkpoint.checkpoint(lambda x:self.conv(self.deform(x)), x)
 
 class OffBlock(nn.Module):
     def __init__(self, in_channels, out_channels, stride):
@@ -193,7 +195,7 @@ class Offnet(SequentialModule):
     @property
     def name(self):
         return (
-            'WRN-{depth}-{widen_factor}-'
+            'Offnet-{depth}-{widen_factor}-'
             '{label}-{size}x{size}x{channels}'
         ).format(
             depth=(self.total_block_number+4),
