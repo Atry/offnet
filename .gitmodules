@@ -1,0 +1,3 @@
+[submodule "Random-Erasing"]
+	path = RandomErasing
+	url = https://github.com/zhunzhong07/Random-Erasing
