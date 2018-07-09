@@ -274,7 +274,8 @@ class ResidualBlock(nn.Module):
     def forward(self, x):
         x_nonlinearity_applied = self.relu1(self.bn1(x))
         y = self.conv1(x_nonlinearity_applied)
-        y = self.conv2(self.dropout(self.relu2(self.bn2(y))))
+        y = self.dropout(y)
+        y = self.conv2(self.relu2(self.bn2(y)))
         return y.add_(self.conv_transform(x) if self.need_transform else x)
 
 
