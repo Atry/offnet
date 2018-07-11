@@ -198,7 +198,7 @@ class Offnet(SequentialModule):
             'Offnet-{depth}-{widen_factor}-'
             '{label}-{size}x{size}x{channels}'
         ).format(
-            depth=(self.total_block_number+4),
+            depth=(self.total_block_number * 2 + 4),
             widen_factor=self.widen_factor,
             size=self.input_size,
             channels=self.in_channels,
@@ -338,7 +338,7 @@ class WideResNet(SequentialModule):
             'WRN-{depth}-{widen_factor}-'
             '{label}-{size}x{size}x{channels}'
         ).format(
-            depth=(self.total_block_number+4),
+            depth=self.total_block_number * 2 + 4,
             widen_factor=self.widen_factor,
             size=self.input_size,
             channels=self.in_channels,
